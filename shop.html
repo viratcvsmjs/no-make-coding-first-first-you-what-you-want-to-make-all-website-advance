@@ -1,0 +1,882 @@
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, signInAnonymously, signInWithCustomToken, 
+  createUserWithEmailAndPassword, signInWithEmailAndPassword, 
+  signOut, onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, doc, setDoc, updateDoc, deleteDoc, onSnapshot, 
+  collection, query, addDoc, serverTimestamp, setLogLevel 
+} from 'firebase/firestore';
+import { Package, ShoppingCart, User, LogOut, Loader, CreditCard, Home, Mail, Phone, MapPin, CheckCircle } from 'lucide-react';
+
+// --- Global Variable Handling ---
+// IMPORTANT: These global variables are provided by the runtime environment.
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : undefined;
+
+// Mock Product Data
+const MOCK_PRODUCTS = [
+  { id: 'p1', name: 'Advanced AI Headset', price: 299.99, description: 'Enhance cognitive function with advanced neural integration.' },
+  { id: 'p2', name: 'Quantum Leap Sneakers', price: 150.00, description: 'The only shoe designed for parallel dimensions.' },
+  { id: 'p3', name: 'Synthetic Fruit Pack', price: 25.50, description: 'Nutritionally complete, zero carbon footprint.' },
+  { id: 'p4', name: 'Holographic Display', price: 799.00, description: 'True 3D interaction without glasses.' },
+];
+
+// Firestore Path Helper
+const getCartCollectionRef = (db, userId) => 
+  collection(db, `/artifacts/${appId}/users/${userId}/cart`);
+
+const getOrdersCollectionRef = (db, userId) => 
+  collection(db, `/artifacts/${appId}/users/${userId}/orders`);
+
+// Set log level for debugging Firestore issues
+if (Object.keys(firebaseConfig).length > 0) {
+  setLogLevel('debug');
+}
+
+// --- Component: UI Elements ---
+
+const ErrorMessage = ({ message }) => (
+  <div className="p-4 bg-red-100 text-red-700 rounded-lg flex items-center mb-4">
+    <span className="font-medium mr-2">Error:</span>
+    {message}
+  </div>
+);
+
+const SuccessMessage = ({ message }) => (
+  <div className="p-4 bg-green-100 text-green-700 rounded-lg flex items-center mb-4">
+    <CheckCircle className="w-5 h-5 mr-2" />
+    {message}
+  </div>
+);
+
+// --- Component: Product Card ---
+
+const ProductCard = ({ product, onAddToCart, isLoading }) => (
+  <div className="bg-white p-6 rounded-xl shadow-lg hover:shadow-xl transition duration-300 border border-gray-100">
+    <h3 className="text-xl font-bold text-gray-800">{product.name}</h3>
+    <p className="text-sm text-gray-500 mt-1 h-10 overflow-hidden">{product.description}</p>
+    <div className="flex items-end justify-between mt-4">
+      <span className="text-2xl font-extrabold text-indigo-600">${product.price.toFixed(2)}</span>
+      <button
+        onClick={() => onAddToCart(product)}
+        disabled={isLoading}
+        className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-lg transition duration-150 shadow-md disabled:opacity-50 flex items-center"
+      >
+        <ShoppingCart className="w-4 h-4 mr-2" />
+        {isLoading ? 'Adding...' : 'Add to Cart'}
+      </button>
+    </div>
+  </div>
+);
+
+// --- Component: Cart View ---
+
+const CartView = ({ cart, onUpdateQuantity, onRemoveItem, onGoToCheckout, isLoading }) => {
+  const totalItems = useMemo(() => cart.reduce((sum, item) => sum + item.quantity, 0), [cart]);
+  const totalPrice = useMemo(() => cart.reduce((sum, item) => sum + (item.price * item.quantity), 0), [cart]);
+
+  if (isLoading) {
+    return (
+      <div className="flex justify-center items-center h-48">
+        <Loader className="w-8 h-8 animate-spin text-indigo-500" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <h2 className="text-3xl font-extrabold text-gray-900 border-b pb-2">Your Cart ({totalItems} items)</h2>
+
+      {cart.length === 0 ? (
+        <div className="p-8 text-center bg-gray-50 rounded-xl">
+          <ShoppingCart className="w-12 h-12 mx-auto text-gray-400 mb-4" />
+          <p className="text-lg text-gray-500">Your cart is empty.</p>
+        </div>
+      ) : (
+        <>
+          <div className="space-y-4">
+            {cart.map(item => (
+              <div key={item.docId} className="flex items-center justify-between bg-white p-4 rounded-xl shadow-sm border">
+                <div className="flex-1">
+                  <h3 className="font-semibold text-gray-800">{item.name}</h3>
+                  <p className="text-sm text-gray-500">${item.price.toFixed(2)} each</p>
+                </div>
+                <div className="flex items-center space-x-3">
+                  <button 
+                    onClick={() => onUpdateQuantity(item.docId, item.quantity - 1)} 
+                    disabled={item.quantity <= 1}
+                    className="p-1 border rounded-full hover:bg-gray-100 disabled:opacity-50"
+                  >
+                    -
+                  </button>
+                  <span className="w-6 text-center font-medium">{item.quantity}</span>
+                  <button 
+                    onClick={() => onUpdateQuantity(item.docId, item.quantity + 1)} 
+                    className="p-1 border rounded-full hover:bg-gray-100"
+                  >
+                    +
+                  </button>
+                  <span className="font-bold w-20 text-right">${(item.price * item.quantity).toFixed(2)}</span>
+                  <button
+                    onClick={() => onRemoveItem(item.docId)}
+                    className="text-red-500 hover:text-red-700 transition duration-150 ml-4 text-sm"
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="bg-indigo-50 p-6 rounded-xl shadow-inner space-y-4">
+            <div className="flex justify-between items-center text-xl font-semibold text-gray-800">
+              <span>Subtotal:</span>
+              <span>${totalPrice.toFixed(2)}</span>
+            </div>
+            <button
+              onClick={onGoToCheckout}
+              className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-lg transition duration-150 shadow-lg flex items-center justify-center disabled:opacity-50"
+              disabled={cart.length === 0}
+            >
+              Proceed to Checkout
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
+// --- Component: Auth Form ---
+
+const AuthForm = ({ db, auth, onAuthSuccess }) => {
+  const [isLogin, setIsLogin] = useState(true);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+
+    try {
+      if (isLogin) {
+        await signInWithEmailAndPassword(auth, email, password);
+      } else {
+        await createUserWithEmailAndPassword(auth, email, password);
+      }
+      onAuthSuccess();
+    } catch (err) {
+      console.error(err);
+      setError(err.message.replace('Firebase: ', ''));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="max-w-md mx-auto bg-white p-8 rounded-xl shadow-2xl border border-indigo-100">
+      <h2 className="text-3xl font-extrabold text-center mb-6 text-indigo-600">{isLogin ? 'Sign In' : 'Sign Up'}</h2>
+      
+      {error && <ErrorMessage message={error} />}
+
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div>
+          <label className="block text-sm font-medium text-gray-700">Email Address</label>
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+            className="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+            placeholder="you@example.com"
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700">Password</label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+            className="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+            placeholder="Min 6 characters"
+          />
+        </div>
+        
+        <button
+          type="submit"
+          disabled={loading}
+          className="w-full flex justify-center py-2 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+        >
+          {loading ? <Loader className="w-5 h-5 animate-spin" /> : (isLogin ? 'Sign In' : 'Sign Up')}
+        </button>
+      </form>
+
+      <div className="mt-6 text-center">
+        <button
+          onClick={() => setIsLogin(!isLogin)}
+          className="text-sm text-indigo-600 hover:text-indigo-800"
+        >
+          {isLogin ? "Don't have an account? Sign Up" : "Already have an account? Sign In"}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+
+// --- Component: Checkout Form ---
+
+const CheckoutForm = ({ cart, placeOrder, setPage, isPlacingOrder }) => {
+  const [form, setForm] = useState({
+    name: '',
+    address: '',
+    phone: '',
+    email: '',
+    paymentMethod: 'COD',
+    notes: ''
+  });
+  const [error, setError] = useState(null);
+  const [success, setSuccess] = useState(null);
+
+  const total = useMemo(() => cart.reduce((sum, item) => sum + (item.price * item.quantity), 0), [cart]);
+
+  const handleChange = (e) => {
+    setForm({ ...form, [e.target.name]: e.target.value });
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError(null);
+    setSuccess(null);
+
+    if (cart.length === 0) {
+        setError("Your cart is empty. Cannot place an order.");
+        return;
+    }
+
+    if (!form.name || !form.address || !form.phone || !form.email) {
+        setError("Please fill in all required fields (Name, Address, Phone, Email).");
+        return;
+    }
+
+    try {
+      await placeOrder(form, total);
+      setSuccess("Order successfully placed! Check your orders tab.");
+      // Clear form after successful order placement is handled by App's placeOrder
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const InputField = ({ label, name, type = 'text', icon: Icon, required = true }) => (
+    <div className="col-span-1">
+      <label className="block text-sm font-medium text-gray-700 mb-1">{label} {required && <span className="text-red-500">*</span>}</label>
+      <div className="relative">
+        {Icon && <Icon className="w-4 h-4 absolute left-3 top-3 text-gray-400" />}
+        <input
+          type={type}
+          name={name}
+          value={form[name]}
+          onChange={handleChange}
+          required={required}
+          className={`mt-1 block w-full px-4 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-indigo-500 focus:border-indigo-500 ${Icon ? 'pl-9' : ''}`}
+        />
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="max-w-4xl mx-auto bg-white p-8 rounded-xl shadow-2xl border border-indigo-100">
+      <h2 className="text-3xl font-extrabold text-indigo-600 mb-6 border-b pb-2">Finalize Your Order</h2>
+      
+      {error && <ErrorMessage message={error} />}
+      {success && <SuccessMessage message={success} />}
+
+      <form onSubmit={handleSubmit} className="space-y-6">
+        
+        {/* Contact & Shipping Details */}
+        <fieldset className="border p-4 rounded-lg space-y-4">
+          <legend className="text-lg font-semibold text-gray-800 px-2">Shipping Information</legend>
+          
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <InputField label="Full Name" name="name" icon={User} />
+            <InputField label="Phone Number" name="phone" type="tel" icon={Phone} />
+          </div>
+          <InputField label="Email Address" name="email" type="email" icon={Mail} />
+          <InputField label="Full Address" name="address" icon={MapPin} />
+          
+          <div className="col-span-2">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Order Notes (Optional)</label>
+            <textarea
+              name="notes"
+              value={form.notes}
+              onChange={handleChange}
+              rows="2"
+              className="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-lg shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+            ></textarea>
+          </div>
+        </fieldset>
+
+        {/* Payment Method */}
+        <fieldset className="border p-4 rounded-lg space-y-3">
+            <legend className="text-lg font-semibold text-gray-800 px-2">Payment Method</legend>
+            <div className="flex items-center space-x-6">
+                <label className="flex items-center space-x-2 cursor-pointer">
+                    <input 
+                        type="radio" 
+                        name="paymentMethod" 
+                        value="COD" 
+                        checked={form.paymentMethod === 'COD'}
+                        onChange={handleChange}
+                        className="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500"
+                    />
+                    <span className="text-gray-700 flex items-center"><Package className="w-4 h-4 mr-1"/> Cash on Delivery (COD)</span>
+                </label>
+                <label className="flex items-center space-x-2 cursor-pointer opacity-50">
+                    <input 
+                        type="radio" 
+                        name="paymentMethod" 
+                        value="Card" 
+                        checked={form.paymentMethod === 'Card'}
+                        onChange={handleChange}
+                        disabled
+                        className="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500"
+                    />
+                    <span className="text-gray-700 flex items-center"><CreditCard className="w-4 h-4 mr-1"/> Credit/Debit Card (Coming Soon)</span>
+                </label>
+            </div>
+        </fieldset>
+        
+        {/* Order Summary & Button */}
+        <div className="bg-indigo-50 p-6 rounded-xl shadow-inner space-y-4">
+            <h3 className="text-xl font-bold text-gray-800">Order Summary</h3>
+            <ul className="text-sm space-y-1">
+                {cart.map(item => (
+                    <li key={item.docId} className="flex justify-between">
+                        <span>{item.name} x {item.quantity}</span>
+                        <span>${(item.price * item.quantity).toFixed(2)}</span>
+                    </li>
+                ))}
+            </ul>
+            <div className="pt-2 border-t border-indigo-200 flex justify-between items-center text-2xl font-extrabold text-indigo-600">
+                <span>Total:</span>
+                <span>${total.toFixed(2)}</span>
+            </div>
+        </div>
+
+        <button
+          type="submit"
+          disabled={isPlacingOrder || cart.length === 0 || success}
+          className="w-full flex justify-center py-3 px-4 border border-transparent rounded-lg shadow-xl text-lg font-bold text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-4 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 transition duration-150"
+        >
+          {isPlacingOrder ? <Loader className="w-6 h-6 animate-spin" /> : `Place Order (Total: $${total.toFixed(2)})`}
+        </button>
+      </form>
+
+      <div className="mt-4 text-center">
+        <button onClick={() => setPage('cart')} className="text-sm text-gray-500 hover:text-indigo-600">
+          &larr; Back to Cart
+        </button>
+      </div>
+    </div>
+  );
+};
+
+
+// --- Component: Orders View ---
+
+const OrdersView = ({ db, userId, isLoading }) => {
+  const [orders, setOrders] = useState([]);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!db || !userId) return;
+
+    const ordersRef = getOrdersCollectionRef(db, userId);
+    
+    // NOTE: Order by is avoided to prevent potential index errors,
+    // data is fetched and sorted in memory.
+    const q = query(ordersRef); 
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      try {
+        const fetchedOrders = snapshot.docs.map(doc => ({
+          docId: doc.id,
+          ...doc.data(),
+        })).sort((a, b) => b.timestamp - a.timestamp); // Sort descending by time in memory
+        setOrders(fetchedOrders);
+        setError(null);
+      } catch (err) {
+        console.error("Error fetching orders:", err);
+        setError("Failed to load order history.");
+      }
+    }, (err) => {
+        console.error("Orders Snapshot Error:", err);
+        setError("Real-time order sync failed.");
+    });
+
+    return () => unsubscribe();
+  }, [db, userId]);
+
+  if (isLoading) {
+    return (
+      <div className="flex justify-center items-center h-48">
+        <Loader className="w-8 h-8 animate-spin text-indigo-500" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <h2 className="text-3xl font-extrabold text-gray-900 border-b pb-2">Your Order History</h2>
+
+      {error && <ErrorMessage message={error} />}
+
+      {orders.length === 0 ? (
+        <div className="p-8 text-center bg-gray-50 rounded-xl">
+          <Package className="w-12 h-12 mx-auto text-gray-400 mb-4" />
+          <p className="text-lg text-gray-500">You haven't placed any orders yet.</p>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {orders.map((order, index) => (
+            <div key={order.docId} className="bg-white p-6 rounded-xl shadow-lg border border-gray-100">
+              <div className="flex justify-between items-start border-b pb-3 mb-3">
+                <h3 className="font-bold text-xl text-indigo-600">Order #{orders.length - index}</h3>
+                <span className={`px-3 py-1 text-sm font-semibold rounded-full ${
+                  order.status === 'Pending' ? 'bg-yellow-100 text-yellow-800' : 'bg-green-100 text-green-800'
+                }`}>
+                  {order.status}
+                </span>
+              </div>
+              
+              <p className="text-sm text-gray-500 mb-2">
+                Date: {order.timestamp ? new Date(order.timestamp.seconds * 1000).toLocaleString() : 'N/A'}
+              </p>
+              
+              <div className="grid grid-cols-2 gap-4 text-sm mb-4">
+                <div>
+                    <p className="font-medium">Total Amount:</p>
+                    <p className="text-lg font-extrabold text-green-600">${order.total.toFixed(2)}</p>
+                </div>
+                <div>
+                    <p className="font-medium">Shipping Address:</p>
+                    <p>{order.checkoutData.address}</p>
+                </div>
+                <div>
+                    <p className="font-medium">Payment:</p>
+                    <p>{order.checkoutData.paymentMethod}</p>
+                </div>
+                <div>
+                    <p className="font-medium">User ID:</p>
+                    <p className="break-all text-xs bg-gray-100 p-1 rounded">{order.userId}</p>
+                </div>
+              </div>
+
+              <div className="mt-3 pt-3 border-t border-gray-100">
+                <p className="font-medium text-gray-700 mb-2">Items:</p>
+                <ul className="list-disc list-inside text-sm text-gray-600 space-y-0.5">
+                  {order.items.map((item, i) => (
+                    <li key={i}>{item.name} (x{item.quantity}) - ${(item.price * item.quantity).toFixed(2)}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+
+// --- Main Application Component ---
+
+const App = () => {
+  const [page, setPage] = useState('home'); // 'home', 'cart', 'checkout', 'auth', 'orders'
+  const [cart, setCart] = useState([]);
+  const [db, setDb] = useState(null);
+  const [auth, setAuth] = useState(null);
+  const [userId, setUserId] = useState(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [appError, setAppError] = useState(null);
+  const [loading, setLoading] = useState({ cart: true, orderPlacement: false });
+
+  // 1. Initialize Firebase & Handle Authentication
+  useEffect(() => {
+    if (Object.keys(firebaseConfig).length === 0) {
+      setAppError("Firebase configuration is missing.");
+      return;
+    }
+
+    try {
+      const app = initializeApp(firebaseConfig);
+      const firestore = getFirestore(app);
+      const firebaseAuth = getAuth(app);
+      
+      setDb(firestore);
+      setAuth(firebaseAuth);
+
+      const handleAuth = async (user) => {
+        if (user) {
+          setUserId(user.uid);
+        } else {
+          // If no user (e.g., initial load or sign out), try anonymous sign-in
+          const anonymousUser = await signInAnonymously(firebaseAuth);
+          setUserId(anonymousUser.user.uid);
+        }
+        setIsAuthReady(true);
+      };
+
+      const unsubscribeAuth = onAuthStateChanged(firebaseAuth, async (user) => {
+        if (user) {
+          // User is signed in (or was signed in from custom token)
+          setUserId(user.uid);
+          setIsAuthReady(true);
+        } else if (initialAuthToken) {
+            // Attempt to sign in with custom token if available
+            try {
+                await signInWithCustomToken(firebaseAuth, initialAuthToken);
+                // onAuthStateChanged will handle setting the user ID after success
+            } catch (error) {
+                console.error("Custom token sign-in failed. Falling back to anonymous.", error);
+                await handleAuth(null);
+            }
+        } else {
+            // No custom token, proceed with anonymous or handle sign-in manually
+            await handleAuth(null);
+        }
+
+        // Redirect to Auth page if the current user is anonymous
+        if (firebaseAuth.currentUser && firebaseAuth.currentUser.isAnonymous && page !== 'home') {
+             setPage('auth');
+        }
+      });
+
+      return () => unsubscribeAuth();
+    } catch (e) {
+      console.error("Firebase Initialization Error:", e);
+      setAppError("Failed to initialize Firebase services.");
+    }
+  }, []);
+
+  // 2. Real-time Cart Listener (onSnapshot)
+  useEffect(() => {
+    if (!db || !userId || !isAuthReady) {
+      setLoading(l => ({ ...l, cart: true }));
+      return;
+    }
+
+    const cartRef = getCartCollectionRef(db, userId);
+    
+    // Create query to listen to the user's private cart data
+    const q = query(cartRef); 
+
+    setLoading(l => ({ ...l, cart: true }));
+    
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      try {
+        const items = snapshot.docs.map(doc => ({
+          docId: doc.id,
+          ...doc.data(),
+        }));
+        setCart(items);
+        setLoading(l => ({ ...l, cart: false }));
+        setAppError(null);
+      } catch (err) {
+        console.error("Cart Snapshot Error:", err);
+        setAppError("Failed to sync cart data in real-time.");
+        setLoading(l => ({ ...l, cart: false }));
+      }
+    }, (err) => {
+        console.error("Cart Listener Error:", err);
+        setAppError("Real-time cart sync failed.");
+        setLoading(l => ({ ...l, cart: false }));
+    });
+
+    return () => unsubscribe();
+  }, [db, userId, isAuthReady]); // Re-run when DB or User changes
+
+  // 3. Cart Management Actions
+  
+  const handleAddToCart = async (product) => {
+    if (!db || !userId) {
+      setAppError("Authentication not ready. Please wait.");
+      return;
+    }
+    
+    setLoading(l => ({ ...l, cart: true }));
+
+    try {
+      const existingItem = cart.find(item => item.productId === product.id);
+      
+      if (existingItem) {
+        // Update existing item
+        const itemDocRef = doc(db, getCartCollectionRef(db, userId).path, existingItem.docId);
+        await updateDoc(itemDocRef, { quantity: existingItem.quantity + 1 });
+      } else {
+        // Add new item
+        await addDoc(getCartCollectionRef(db, userId), {
+          productId: product.id,
+          name: product.name,
+          price: product.price,
+          quantity: 1,
+        });
+      }
+      setAppError(null);
+    } catch (e) {
+      console.error("Error adding to cart: ", e);
+      setAppError("Could not update cart. Check console for details.");
+    } finally {
+      setLoading(l => ({ ...l, cart: false }));
+    }
+  };
+
+  const handleUpdateQuantity = async (docId, newQuantity) => {
+    if (!db || !userId || newQuantity < 1) return;
+
+    setLoading(l => ({ ...l, cart: true }));
+
+    try {
+      const itemDocRef = doc(db, getCartCollectionRef(db, userId).path, docId);
+      await updateDoc(itemDocRef, { quantity: newQuantity });
+      setAppError(null);
+    } catch (e) {
+      console.error("Error updating quantity: ", e);
+      setAppError("Could not update item quantity.");
+    } finally {
+      setLoading(l => ({ ...l, cart: false }));
+    }
+  };
+
+  const handleRemoveItem = async (docId) => {
+    if (!db || !userId) return;
+    
+    setLoading(l => ({ ...l, cart: true }));
+
+    try {
+      const itemDocRef = doc(db, getCartCollectionRef(db, userId).path, docId);
+      await deleteDoc(itemDocRef);
+      setAppError(null);
+    } catch (e) {
+      console.error("Error removing item: ", e);
+      setAppError("Could not remove item from cart.");
+    } finally {
+      setLoading(l => ({ ...l, cart: false }));
+    }
+  };
+
+  // 4. Order Placement Action
+  const handlePlaceOrder = async (checkoutData, total) => {
+    if (!db || !userId || cart.length === 0) {
+      throw new Error("Cannot place order. Cart is empty or user is not ready.");
+    }
+    
+    setLoading(l => ({ ...l, orderPlacement: true }));
+
+    try {
+      // 1. Create the new Order document
+      await addDoc(getOrdersCollectionRef(db, userId), {
+        userId: userId,
+        items: cart, // Snapshot of the cart items at the time of order
+        total: total,
+        checkoutData: checkoutData,
+        status: 'Pending',
+        timestamp: serverTimestamp(),
+      });
+
+      // 2. Clear the Cart (delete all items in the cart collection)
+      const cartRef = getCartCollectionRef(db, userId);
+      // Because we are using onSnapshot, cart state is already updated, 
+      // but we need to delete the docs.
+      await Promise.all(cart.map(item => deleteDoc(doc(cartRef, item.docId))));
+      
+      setPage('orders');
+      return "Order successfully placed.";
+
+    } catch (e) {
+      console.error("Error placing order: ", e);
+      setAppError("Order failed to save to database.");
+      throw new Error("Order failed to process. Please try again.");
+    } finally {
+      setLoading(l => ({ ...l, orderPlacement: false }));
+    }
+  };
+  
+  // 5. Authentication Actions
+  const handleSignOut = async () => {
+    if (auth) {
+      try {
+        await signOut(auth);
+        // After sign out, the onAuthStateChanged listener will trigger
+        // a fallback to anonymous sign-in, maintaining a userId for cart state.
+        setPage('home');
+      } catch (e) {
+        console.error("Sign Out Error:", e);
+        setAppError("Failed to sign out.");
+      }
+    }
+  };
+
+  const handleAuthSuccess = () => {
+    setPage('home');
+    setAppError(null);
+  }
+
+  // Determine if the user is signed in with email/password (not anonymous)
+  const isAuthenticatedUser = auth?.currentUser && !auth.currentUser.isAnonymous;
+  const showAuthRequiredMessage = !isAuthenticatedUser && (page === 'checkout' || page === 'orders');
+
+  // --- Render Navigation ---
+  const NavButton = ({ targetPage, label, icon: Icon, isAuthRestricted = false }) => (
+    <button
+      onClick={() => {
+        if (isAuthRestricted && !isAuthenticatedUser) {
+          setPage('auth');
+        } else {
+          setPage(targetPage);
+        }
+      }}
+      className={`p-3 rounded-xl transition-colors duration-200 flex items-center justify-center 
+                  ${page === targetPage 
+                    ? 'bg-indigo-600 text-white shadow-lg' 
+                    : 'bg-indigo-100 text-indigo-700 hover:bg-indigo-200'}
+                  ${isAuthRestricted && !isAuthenticatedUser ? 'opacity-50 cursor-not-allowed' : ''}
+                  `}
+    >
+      <Icon className="w-5 h-5" />
+      <span className="ml-2 hidden sm:inline">{label}</span>
+      {targetPage === 'cart' && cart.length > 0 && (
+        <span className="ml-2 bg-red-500 text-white text-xs font-bold rounded-full h-5 w-5 flex items-center justify-center">{cart.length}</span>
+      )}
+    </button>
+  );
+
+  const renderContent = () => {
+    if (!isAuthReady) {
+      return (
+        <div className="text-center p-12">
+          <Loader className="w-8 h-8 animate-spin mx-auto text-indigo-500" />
+          <p className="mt-4 text-gray-600">Initializing services and authenticating user...</p>
+        </div>
+      );
+    }
+    
+    if (showAuthRequiredMessage) {
+        return (
+            <div className="p-8 text-center bg-yellow-100 rounded-xl max-w-xl mx-auto mt-12">
+                <h3 className="text-2xl font-bold text-yellow-800 mb-3">Authentication Required</h3>
+                <p className="text-gray-700 mb-6">
+                    You must sign in with an email and password to access the Checkout and Orders pages.
+                </p>
+                <button
+                    onClick={() => setPage('auth')}
+                    className="bg-yellow-600 hover:bg-yellow-700 text-white font-semibold py-2 px-4 rounded-lg shadow-md transition duration-150"
+                >
+                    Go to Login/Sign Up
+                </button>
+            </div>
+        );
+    }
+
+    switch (page) {
+      case 'cart':
+        return (
+          <CartView 
+            cart={cart}
+            onUpdateQuantity={handleUpdateQuantity}
+            onRemoveItem={handleRemoveItem}
+            onGoToCheckout={() => setPage('checkout')}
+            isLoading={loading.cart}
+          />
+        );
+      case 'checkout':
+        return (
+          <CheckoutForm 
+            cart={cart}
+            placeOrder={handlePlaceOrder}
+            setPage={setPage}
+            isPlacingOrder={loading.orderPlacement}
+          />
+        );
+      case 'auth':
+        return <AuthForm db={db} auth={auth} onAuthSuccess={handleAuthSuccess} />;
+      case 'orders':
+        return <OrdersView db={db} userId={userId} isLoading={loading.cart} />;
+      case 'home':
+      default:
+        return (
+          <div className="space-y-6">
+            <h2 className="text-3xl font-extrabold text-gray-900">Featured Products</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+              {MOCK_PRODUCTS.map(product => (
+                <ProductCard 
+                  key={product.id} 
+                  product={product} 
+                  onAddToCart={handleAddToCart} 
+                  isLoading={loading.cart}
+                />
+              ))}
+            </div>
+          </div>
+        );
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50 font-sans">
+      <script src="https://cdn.tailwindcss.com"></script>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+      `}</style>
+      
+      <header className="bg-white shadow-md sticky top-0 z-10">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
+          <h1 className="text-2xl font-extrabold text-indigo-700">ADVANCED STORE</h1>
+          
+          <div className="flex space-x-2 sm:space-x-4 items-center">
+            <NavButton targetPage="home" label="Shop" icon={Home} />
+            <NavButton targetPage="cart" label="Cart" icon={ShoppingCart} />
+            <NavButton targetPage="orders" label="Orders" icon={Package} isAuthRestricted={true} />
+            
+            {isAuthenticatedUser ? (
+              <>
+                <div className="text-sm font-medium text-gray-500 hidden sm:block">
+                    {auth.currentUser.email}
+                </div>
+                <button
+                  onClick={handleSignOut}
+                  className="p-3 rounded-xl bg-red-100 text-red-700 hover:bg-red-200 transition-colors duration-200 flex items-center justify-center"
+                >
+                  <LogOut className="w-5 h-5" />
+                  <span className="ml-2 hidden sm:inline">Sign Out</span>
+                </button>
+              </>
+            ) : (
+              <NavButton targetPage="auth" label="Login / Sign Up" icon={User} />
+            )}
+          </div>
+        </div>
+        <div className="bg-gray-200 text-xs text-center p-1 text-gray-600">
+            Current User ID (for Firestore access): <span className="font-mono text-indigo-700">{userId || 'N/A'}</span>
+        </div>
+      </header>
+
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 md:py-12">
+        {appError && <ErrorMessage message={appError} />}
+        {renderContent()}
+      </main>
+    </div>
+  );
+};
+
+export default App;
